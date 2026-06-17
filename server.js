@@ -10,68 +10,6 @@ const MASSIVE_BASE = "https://api.massive.com";
 app.use(cors({ origin:"*", methods:["GET","OPTIONS"], allowedHeaders:["Content-Type"] }));
 app.options("*", cors());
 
-// ── Yahoo crumb/cookie cache ──────────────────────────────────
-let yfCrumb  = null;
-let yfCookie = null;
-let crumbExpiry = 0;
-
-const YF_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.5",
-};
-
-async function getYFCrumb() {
-  // Return cached crumb if still valid (1 hour)
-  if(yfCrumb && yfCookie && Date.now() < crumbExpiry) return { crumb:yfCrumb, cookie:yfCookie };
-
-  // Step 1: get cookie from Yahoo consent page
-  const consentRes = await fetch("https://fc.yahoo.com", { headers: YF_HEADERS, redirect:"follow" });
-  const cookies = (consentRes.headers.get("set-cookie")||"").split(",").map(c=>c.split(";")[0].trim()).join("; ");
-
-  // Step 2: fetch crumb using that cookie
-  const crumbRes = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
-    headers: { ...YF_HEADERS, "Cookie": cookies, "Accept":"text/plain" }
-  });
-  const crumb = await crumbRes.text();
-
-  if(crumb && crumb.length > 2 && !crumb.includes("<")) {
-    yfCrumb  = crumb.trim();
-    yfCookie = cookies;
-    crumbExpiry = Date.now() + 55 * 60 * 1000; // 55 min
-    console.log("✅ Yahoo crumb obtained");
-    return { crumb:yfCrumb, cookie:yfCookie };
-  }
-  throw new Error("Could not obtain Yahoo crumb");
-}
-
-async function yfQuotes(tickers) {
-  const { crumb, cookie } = await getYFCrumb();
-  const fields = [
-    "symbol","shortName","regularMarketPrice","regularMarketPreviousClose",
-    "preMarketPrice","preMarketVolume","postMarketPrice","postMarketVolume",
-    "regularMarketVolume","averageDailyVolume3Month","averageDailyVolume10Day",
-    "regularMarketChangePercent","marketCap"
-  ].join(",");
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${tickers.join(",")}&fields=${fields}&crumb=${encodeURIComponent(crumb)}`;
-  const r = await fetch(url, {
-    headers: { ...YF_HEADERS, "Cookie": cookie, "Accept":"application/json" }
-  });
-  const data = await r.json();
-  if(data?.quoteResponse?.error) throw new Error(JSON.stringify(data.quoteResponse.error));
-  return data?.quoteResponse?.result || [];
-}
-
-async function yfScreener(scrId) {
-  const { crumb, cookie } = await getYFCrumb();
-  const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${scrId}&count=25&crumb=${encodeURIComponent(crumb)}`;
-  const r = await fetch(url, {
-    headers: { ...YF_HEADERS, "Cookie": cookie, "Accept":"application/json" }
-  });
-  const data = await r.json();
-  return data?.finance?.result?.[0]?.quotes || [];
-}
-
 // ── health check ──────────────────────────────────────────────
 app.get("/ping", (req, res) => res.json({ status:"ok", message:"WhaleFlow proxy running" }));
 
@@ -97,37 +35,79 @@ app.get("/options/:ticker", async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
-// ── Yahoo bulk quotes ─────────────────────────────────────────
-app.get("/quotes", async (req, res) => {
-  const tickers = (req.query.tickers||"").split(",").map(t=>t.trim().toUpperCase()).filter(Boolean);
-  if(!tickers.length) return res.status(400).json({ error:"no tickers" });
-  console.log(`[quotes] ${tickers.join(",")}`);
-  try {
-    const quotes = await yfQuotes(tickers);
-    const data = {};
-    quotes.forEach(q => { data[q.symbol] = q; });
-    tickers.forEach(t => { if(!data[t]) data[t] = { error:"not found" }; });
-    res.json({ ok:true, data });
-  } catch(e) { res.status(500).json({ ok:false, error:e.message }); }
-});
+// ── Yahoo Finance v8 (no crumb needed) ───────────────────────
+const YF_UA = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
+async function yfQuote(ticker) {
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d&includePrePost=true`;
+  const r = await fetch(url, { headers:{ "User-Agent": YF_UA } });
+  if(!r.ok) throw new Error(`Yahoo ${r.status} for ${ticker}`);
+  const data = await r.json();
+  const meta = data?.chart?.result?.[0]?.meta;
+  if(!meta) throw new Error(`no data for ${ticker}`);
+  return {
+    symbol:                    meta.symbol,
+    shortName:                 meta.shortName || meta.symbol,
+    regularMarketPrice:        meta.regularMarketPrice,
+    regularMarketPreviousClose:meta.previousClose || meta.chartPreviousClose,
+    preMarketPrice:            meta.preMarketPrice || null,
+    postMarketPrice:           meta.postMarketPrice || null,
+    regularMarketVolume:       meta.regularMarketVolume || 0,
+    preMarketVolume:           null, // v8 doesn't expose this directly
+    averageDailyVolume3Month:  meta.averageDailyVolume3Month || null,
+    marketCap:                 meta.marketCap || null,
+    regularMarketChangePercent:meta.regularMarketChangePercent || 0,
+  };
+}
 
 // ── Yahoo single quote ────────────────────────────────────────
 app.get("/quote/:ticker", async (req, res) => {
   try {
-    const quotes = await yfQuotes([req.params.ticker.toUpperCase()]);
-    res.json({ ok:true, data:quotes[0]||null });
+    const data = await yfQuote(req.params.ticker.toUpperCase());
+    res.json({ ok:true, data });
   } catch(e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 
-// ── Yahoo movers ──────────────────────────────────────────────
+// ── Yahoo bulk quotes (sequential, small batches) ─────────────
+app.get("/quotes", async (req, res) => {
+  const tickers = (req.query.tickers||"").split(",").map(t=>t.trim().toUpperCase()).filter(Boolean);
+  if(!tickers.length) return res.status(400).json({ error:"no tickers" });
+  console.log(`[quotes] ${tickers.join(",")}`);
+  const data = {};
+  await Promise.allSettled(
+    tickers.map(async t => {
+      try   { data[t] = await yfQuote(t); }
+      catch { data[t] = { error:"fetch failed", symbol:t }; }
+    })
+  );
+  res.json({ ok:true, data });
+});
+
+// ── Yahoo movers via v8 chart for known tickers ───────────────
+// Railway blocks Yahoo's screener endpoint too, so we use
+// Massive's snapshot for the market movers instead
+const MOVERS_TICKERS = {
+  gainers: ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
+  losers:  ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
+  actives: ["SPY","QQQ","AAPL","NVDA","TSLA","AMD","META","AMZN","GOOGL","MSFT","PLTR","COIN"],
+};
+
 app.get("/movers/:type", async (req, res) => {
-  const map = { gainers:"day_gainers", losers:"day_losers", actives:"most_actives" };
-  const scrId = map[req.params.type] || "day_gainers";
-  console.log(`[movers] ${scrId}`);
-  try {
-    const quotes = await yfScreener(scrId);
-    res.json({ ok:true, data:quotes });
-  } catch(e) { res.status(500).json({ ok:false, error:e.message }); }
+  const type    = req.params.type;
+  const tickers = MOVERS_TICKERS[type] || MOVERS_TICKERS.actives;
+  console.log(`[movers] ${type}`);
+  const results = [];
+  await Promise.allSettled(
+    tickers.map(async t => {
+      try   { results.push(await yfQuote(t)); }
+      catch {}
+    })
+  );
+  // Sort by change percent: gainers = highest, losers = lowest, actives = most volume
+  if(type==="gainers") results.sort((a,b)=>(b.regularMarketChangePercent||0)-(a.regularMarketChangePercent||0));
+  else if(type==="losers") results.sort((a,b)=>(a.regularMarketChangePercent||0)-(b.regularMarketChangePercent||0));
+  else results.sort((a,b)=>(b.regularMarketVolume||0)-(a.regularMarketVolume||0));
+  res.json({ ok:true, data:results });
 });
 
 app.listen(PORT, () => console.log(`🐋 WhaleFlow proxy on port ${PORT}`));
