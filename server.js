@@ -111,3 +111,21 @@ app.get("/movers/:type", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`🐋 WhaleFlow proxy on port ${PORT}`));
+
+// ── Claude relay (for Runner Finder) ─────────────────────────
+app.use(express.json());
+app.post("/claude", async (req, res) => {
+  console.log("[claude relay]");
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(req.body),
+    });
+    const data = await r.json();
+    res.status(r.status).json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
