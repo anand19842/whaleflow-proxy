@@ -84,49 +84,39 @@ app.get("/quotes", async (req, res) => {
   res.json({ ok:true, data });
 });
 
-// ── Yahoo movers via v8 chart for known tickers ───────────────
-// Railway blocks Yahoo's screener endpoint too, so we use
-// Massive's snapshot for the market movers instead
-const MOVERS_TICKERS = {
-  gainers: ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
-  losers:  ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
-  actives: ["SPY","QQQ","AAPL","NVDA","TSLA","AMD","META","AMZN","GOOGL","MSFT","PLTR","COIN"],
+// ── Movers + Small Cap Runners ───────────────────────────────
+const TICKER_LISTS = {
+  gainers:  ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
+  losers:   ["NVDA","TSLA","AAPL","AMD","META","PLTR","COIN","MARA","ARM","SMCI","SOFI","HOOD"],
+  actives:  ["SPY","QQQ","AAPL","NVDA","TSLA","AMD","META","AMZN","GOOGL","MSFT","PLTR","COIN"],
+  // Small cap momentum names — under $30, high beta
+  smallcap: [
+    "MARA","RIOT","HOOD","SOFI","MSTR","NVTS","SOUN","KULR",
+    "RGTI","QBTS","IONQ","ARQQ","QUBT","ACHR","JOBY","RKLB","LUNR",
+    "SPAI","FFAI","LASE","RCAT","ONDS","HIVE","CIFR","BTBT","HUT","CLSK",
+    "NKLA","GOEV","RIDE","WKHS","BLNK","CHPT","PTRA","IDEANOMICS",
+    "CLOV","WISH","WOOF","SKLZ","BARK","ZETA","OPEN","MAPS"
+  ],
 };
 
 app.get("/movers/:type", async (req, res) => {
   const type    = req.params.type;
-  const tickers = MOVERS_TICKERS[type] || MOVERS_TICKERS.actives;
-  console.log(`[movers] ${type}`);
+  const tickers = TICKER_LISTS[type] || TICKER_LISTS.actives;
+  console.log(`[movers] ${type} (${tickers.length} tickers)`);
   const results = [];
   await Promise.allSettled(
     tickers.map(async t => {
-      try   { results.push(await yfQuote(t)); }
-      catch {}
+      try { results.push(await yfQuote(t)); } catch {}
     })
   );
-  // Sort by change percent: gainers = highest, losers = lowest, actives = most volume
-  if(type==="gainers") results.sort((a,b)=>(b.regularMarketChangePercent||0)-(a.regularMarketChangePercent||0));
-  else if(type==="losers") results.sort((a,b)=>(a.regularMarketChangePercent||0)-(b.regularMarketChangePercent||0));
-  else results.sort((a,b)=>(b.regularMarketVolume||0)-(a.regularMarketVolume||0));
+  // Sort appropriately
+  if(type==="gainers"||type==="smallcap")
+    results.sort((a,b)=>(b.regularMarketChangePercent||0)-(a.regularMarketChangePercent||0));
+  else if(type==="losers")
+    results.sort((a,b)=>(a.regularMarketChangePercent||0)-(b.regularMarketChangePercent||0));
+  else
+    results.sort((a,b)=>(b.regularMarketVolume||0)-(a.regularMarketVolume||0));
   res.json({ ok:true, data:results });
 });
 
 app.listen(PORT, () => console.log(`🐋 WhaleFlow proxy on port ${PORT}`));
-
-// ── Claude relay (for Runner Finder) ─────────────────────────
-app.post("/claude", async (req, res) => {
-  console.log("[claude relay]");
-  try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-        "x-api-key": process.env.ANTHROPIC_KEY || "",
-      },
-      body: JSON.stringify(req.body),
-    });
-    const data = await r.json();
-    res.status(r.status).json(data);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
