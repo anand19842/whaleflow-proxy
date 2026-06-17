@@ -7,8 +7,9 @@ const PORT         = process.env.PORT || 3001;
 const MASSIVE_KEY  = process.env.MASSIVE_KEY || "pWvpNRpSnrv3Ah8uKtytUmkhSFqOJ7n0";
 const MASSIVE_BASE = "https://api.massive.com";
 
-app.use(cors({ origin:"*", methods:["GET","OPTIONS"], allowedHeaders:["Content-Type"] }));
+app.use(cors({ origin:"*", methods:["GET","POST","OPTIONS"], allowedHeaders:["Content-Type"] }));
 app.options("*", cors());
+app.use(express.json());
 
 // ── health check ──────────────────────────────────────────────
 app.get("/ping", (req, res) => res.json({ status:"ok", message:"WhaleFlow proxy running" }));
@@ -113,7 +114,6 @@ app.get("/movers/:type", async (req, res) => {
 app.listen(PORT, () => console.log(`🐋 WhaleFlow proxy on port ${PORT}`));
 
 // ── Claude relay (for Runner Finder) ─────────────────────────
-app.use(express.json());
 app.post("/claude", async (req, res) => {
   console.log("[claude relay]");
   try {
